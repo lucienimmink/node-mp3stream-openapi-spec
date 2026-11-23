@@ -1,0 +1,2195 @@
+openapi: 3.1.0
+
+info:
+  title: node-mp3stream API
+  version: 6.0.0
+  description: |
+    API for JSMusicDB music library access, media streaming, artwork,
+    Server-Sent Events and remote playback.
+
+    Authentication
+    ==============
+
+    All authenticated API operations use an RFC 6750 Bearer token:
+
+        Authorization: Bearer <jwt>
+
+    SECURITY REQUIREMENT:
+
+    A JWT MUST NEVER be included in:
+
+    - a query parameter
+    - a path parameter
+    - a media URL
+    - an SSE URL
+    - UPnP/DLNA metadata
+    - a renderer URL
+
+    URLs may be written to access logs, reverse-proxy logs, browser history,
+    monitoring systems and diagnostics. Keeping JWTs out of URLs avoids
+    accidental credential disclosure through those systems.
+
+    Media delivery
+    ==============
+
+    Clients that cannot provide an Authorization header for media requests,
+    including HTML audio elements and DLNA renderers, use temporary media
+    capabilities.
+
+    An authenticated client first creates a media resource through:
+
+        POST /api/media
+
+    The returned opaque media URL can then be consumed without a JWT.
+
+    A media token:
+
+    - is cryptographically random
+    - is scoped to one media resource
+    - has a limited lifetime
+    - does not reveal the library path
+    - does not contain a JWT
+
+    Remote playback
+    ===============
+
+    Remote playback initially supports DLNA/UPnP AV MediaRenderers.
+
+    node-mp3stream provides:
+
+    - renderer discovery
+    - renderer control
+    - renderer state
+    - media delivery
+
+    JSMusicDB remains responsible for:
+
+    - playlists
+    - queue order
+    - current playlist index
+    - shuffle
+    - previous/next selection
+    - continuous play
+    - scrobbling
+
+servers:
+  - url: http://localhost:16882
+    description: Default local server
+
+  - url: https://localhost:16882
+    description: Local server with SSL enabled
+
+tags:
+  - name: Authentication
+    description: Authentication and JWT validation.
+
+  - name: Media
+    description: Temporary, capability-based media resources.
+
+  - name: Library
+    description: Library scanning and status.
+
+  - name: Artwork
+    description: Artwork caching and retrieval.
+
+  - name: Events
+    description: Server-Sent Events.
+
+  - name: Playback
+    description: Remote playback target discovery and control.
+
+  - name: System
+    description: Server information.
+
+paths:
+
+  /authenticate:
+    post:
+      tags:
+        - Authentication
+
+      operationId: authenticate
+
+      summary: Authenticate and obtain a JWT
+
+      description: |
+        Exchanges encrypted credentials for a JWT.
+
+        The plaintext JSON credentials contain:
+
+            {
+              "name": "...",
+              "password": "..."
+            }
+
+        The credential JSON is encrypted using the RSA public key returned
+        by `/public-key`, RSA-OAEP and SHA-512.
+
+        The encrypted data is Base64 encoded and supplied as
+        `encryptedPayload`.
+
+        A successful request returns a JWT.
+
+        The JWT is subsequently supplied exclusively using:
+
+            Authorization: Bearer <jwt>
+
+      security: []
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+
+              required:
+                - encryptedPayload
+
+              properties:
+                encryptedPayload:
+                  type: string
+                  contentEncoding: base64
+                  description: |
+                    Base64 encoded RSA-OAEP/SHA-512 encrypted credentials.
+
+      responses:
+
+        "200":
+          description: Authentication successful.
+
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - jwt
+
+                properties:
+                  jwt:
+                    type: string
+                    description: Signed authentication JWT.
+
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /login:
+    get:
+      tags:
+        - Authentication
+
+      operationId: checkLogin
+
+      summary: Validate the current JWT
+
+      description: |
+        Validates the Bearer token supplied in the Authorization header.
+
+        This endpoint replaces the previous X-Cred based authentication.
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "200":
+          description: JWT is valid.
+
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - success
+
+                properties:
+                  success:
+                    type: boolean
+                    const: true
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /public-key:
+    get:
+      tags:
+        - Authentication
+
+      operationId: getPublicKey
+
+      summary: Get the authentication RSA public key
+
+      security: []
+
+      responses:
+
+        "200":
+          description: RSA public JSON Web Key.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RsaPublicKey"
+
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/media:
+    post:
+      tags:
+        - Media
+
+      operationId: createMediaResource
+
+      summary: Create a temporary media resource
+
+      description: |
+        Creates a temporary capability URL for a music-library resource.
+
+        This is used for consumers that cannot supply a Bearer Authorization
+        header while retrieving media, including:
+
+        - HTML audio elements
+        - DLNA/UPnP renderers
+
+        The returned URL contains a random opaque media token.
+
+        It never contains the user's JWT.
+
+        The path is validated against the configured MUSICPATH. Paths and
+        symlinks resolving outside MUSICPATH are rejected.
+
+        The requested purpose allows node-mp3stream to choose an appropriate
+        externally reachable URL.
+
+        For `renderer`, the optional target ID identifies the playback target
+        that will consume the resource.
+
+      security:
+        - BearerJwt: []
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMediaRequest"
+
+      responses:
+
+        "201":
+          description: Temporary media resource created.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMediaResponse"
+
+        "400":
+          $ref: "#/components/responses/ApiBadRequest"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "403":
+          $ref: "#/components/responses/ApiForbidden"
+
+        "404":
+          $ref: "#/components/responses/MediaNotFound"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/media/{token}:
+    get:
+      tags:
+        - Media
+
+      operationId: streamMediaResource
+
+      summary: Stream a temporary media resource
+
+      description: |
+        Streams the media resource associated with an opaque capability
+        token.
+
+        No JWT is required for this endpoint.
+
+        Access is authorized by possession of the temporary media token.
+
+        Tokens are:
+
+        - cryptographically random
+        - scoped to one media resource
+        - time limited
+        - unrelated to the user's JWT
+
+        The endpoint supports HTTP byte ranges for seeking and renderer
+        compatibility.
+
+      security: []
+
+      parameters:
+
+        - name: token
+          in: path
+          required: true
+
+          description: Opaque temporary media capability token.
+
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 512
+
+        - name: Range
+          in: header
+          required: false
+
+          description: |
+            Optional single HTTP byte range.
+
+            Examples:
+
+                bytes=0-1023
+                bytes=1024-
+                bytes=-1024
+
+          schema:
+            type: string
+
+      responses:
+
+        "200":
+          description: Complete media stream.
+
+          headers:
+
+            Accept-Ranges:
+              schema:
+                type: string
+                const: bytes
+
+            Content-Length:
+              schema:
+                type: integer
+                minimum: 0
+
+          content:
+
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+
+            audio/mp4:
+              schema:
+                type: string
+                format: binary
+
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+
+            audio/ogg:
+              schema:
+                type: string
+                format: binary
+
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+
+        "206":
+          description: Partial media stream.
+
+          headers:
+
+            Accept-Ranges:
+              schema:
+                type: string
+                const: bytes
+
+            Content-Range:
+              schema:
+                type: string
+
+            Content-Length:
+              schema:
+                type: integer
+                minimum: 1
+
+          content:
+
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+
+            audio/mp4:
+              schema:
+                type: string
+                format: binary
+
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+
+            audio/ogg:
+              schema:
+                type: string
+                format: binary
+
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+
+        "404":
+          description: |
+            Media capability does not exist, has expired, was revoked,
+            or its underlying resource no longer exists.
+
+        "416":
+          description: Requested byte range is invalid or unsatisfiable.
+
+          headers:
+
+            Content-Range:
+              schema:
+                type: string
+
+              example: "bytes */50000"
+
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /rescan:
+    post:
+      tags:
+        - Library
+
+      operationId: startLibraryScan
+
+      summary: Start a library scan
+
+      description: |
+        Starts a music-library scan asynchronously.
+
+        Progress is reported through `/progress` and through the
+        `library.scan-progress` SSE event.
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "202":
+          description: Library scan started.
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /progress:
+    get:
+      tags:
+        - Library
+
+      operationId: getScanProgress
+
+      summary: Get library scan progress
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "200":
+          description: Current scan status.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanProgress"
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /stream:
+    get:
+      tags:
+        - Events
+
+      operationId: subscribeToEvents
+
+      summary: Subscribe to server-sent events
+
+      description: |
+        Opens the authenticated Server-Sent Events stream.
+
+        Authentication is performed exclusively through:
+
+            Authorization: Bearer <jwt>
+
+        The JWT MUST NOT be placed in the stream URL.
+
+        This means browser clients cannot use the native EventSource API
+        when Bearer authentication is required, because EventSource does
+        not support custom Authorization headers.
+
+        JSMusicDB should consume this endpoint using Fetch and parse the
+        returned `text/event-stream`.
+
+        Supported event names include:
+
+        - `library.scan-progress`
+
+        - `playback.target-added`
+        - `playback.target-updated`
+        - `playback.target-removed`
+
+        - `playback.state`
+        - `playback.position`
+        - `playback.volume`
+        - `playback.ended`
+        - `playback.error`
+
+        Playback events use a common envelope containing:
+
+        - eventId
+        - timestamp
+        - optional targetId
+        - event-specific data
+
+        SSE IDs are process-local and monotonically increasing.
+
+        Persistent event replay is not guaranteed.
+
+        After reconnect, the client should retrieve the latest renderer
+        list and active renderer state through the REST API where needed.
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "200":
+          description: Server-Sent Events stream.
+
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              example: no-cache
+
+          content:
+
+            text/event-stream:
+
+              schema:
+                type: string
+
+              examples:
+
+                playbackState:
+                  summary: Playback state changed
+                  value: |
+                    id: 8472
+                    event: playback.state
+                    data: {"eventId":"8472","timestamp":"2026-11-23T09:55:43.381Z","targetId":"dlna:uuid:abc123","data":{"transport":"playing","mediaId":"c69f5811","positionMs":127532,"durationMs":256000}}
+
+                playbackPosition:
+                  summary: Playback position changed
+                  value: |
+                    id: 8473
+                    event: playback.position
+                    data: {"eventId":"8473","timestamp":"2026-11-23T09:55:44.381Z","targetId":"dlna:uuid:abc123","data":{"mediaId":"c69f5811","positionMs":128532,"durationMs":256000}}
+
+                targetAdded:
+                  summary: Renderer discovered
+                  value: |
+                    id: 8474
+                    event: playback.target-added
+                    data: {"eventId":"8474","timestamp":"2026-11-23T09:55:45.000Z","targetId":"dlna:uuid:abc123","data":{"target":{"id":"dlna:uuid:abc123","type":"dlna","name":"Living Room","available":true,"capabilities":{"play":true,"pause":true,"stop":true,"seek":true,"volume":true,"mute":true}}}}
+
+                scanProgress:
+                  summary: Library scan progress
+                  value: |
+                    id: 8475
+                    event: library.scan-progress
+                    data: {"eventId":"8475","timestamp":"2026-11-23T09:55:46.000Z","data":{"progress":42,"status":"scanning"}}
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /image:
+    get:
+      tags:
+        - Artwork
+
+      operationId: findCachedImage
+
+      summary: Find cached artwork
+
+      security: []
+
+      parameters:
+
+        - name: mbid
+          in: query
+          required: false
+
+          description: MusicBrainz identifier.
+
+          schema:
+            type: string
+
+        - name: url
+          in: query
+          required: false
+
+          schema:
+            type: string
+            format: uri
+
+      responses:
+
+        "200":
+          description: Cached artwork URL.
+
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - url
+
+                properties:
+                  url:
+                    type: string
+                    format: uri-reference
+
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    post:
+      tags:
+        - Artwork
+
+      operationId: uploadCachedImage
+
+      summary: Upload artwork to the cache
+
+      security:
+        - BearerJwt: []
+
+      requestBody:
+        required: true
+
+        content:
+
+          multipart/form-data:
+
+            schema:
+              type: object
+              additionalProperties: false
+
+              required:
+                - file
+
+              properties:
+
+                file:
+                  type: string
+                  format: binary
+
+      responses:
+
+        "201":
+          description: Artwork stored.
+
+          content:
+            application/json:
+
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - cachename
+
+                properties:
+
+                  cachename:
+                    type: string
+
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /proxy:
+    get:
+      tags:
+        - Artwork
+
+      operationId: proxyImage
+
+      summary: Proxy a public image or JSON resource
+
+      description: |
+        Fetches an image or JSON resource from a public remote host.
+
+        Authentication uses the Bearer Authorization header.
+
+        The JWT MUST NOT be supplied as part of the proxy URL.
+
+        Private, loopback, link-local and otherwise restricted addresses
+        are rejected.
+
+        This endpoint MUST NOT be used to communicate with DLNA renderers.
+        DLNA communication uses the constrained playback networking layer.
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+
+        - name: remote
+          in: query
+          required: true
+
+          schema:
+            type: string
+            format: uri
+
+      responses:
+
+        "200":
+          description: Retrieved resource.
+
+          content:
+
+            application/json:
+              schema: {}
+
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+
+            image/png:
+              schema:
+                type: string
+                format: binary
+
+            image/gif:
+              schema:
+                type: string
+                format: binary
+
+            image/webp:
+              schema:
+                type: string
+                format: binary
+
+            image/avif:
+              schema:
+                type: string
+                format: binary
+
+            image/bmp:
+              schema:
+                type: string
+                format: binary
+
+            image/tiff:
+              schema:
+                type: string
+                format: binary
+
+            image/x-icon:
+              schema:
+                type: string
+                format: binary
+
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/playback/targets:
+    get:
+      tags:
+        - Playback
+
+      operationId: getPlaybackTargets
+
+      summary: Get discovered remote playback targets
+
+      description: |
+        Returns known remote playback targets.
+
+        Local browser playback belongs to JSMusicDB and is not returned.
+
+        DLNA targets use their UPnP UDN/UUID as the basis for stable
+        identity. IP addresses are not stable target identifiers.
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "200":
+          description: Known playback targets.
+
+          content:
+            application/json:
+
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - targets
+
+                properties:
+
+                  targets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PlaybackTarget"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/discover:
+    post:
+      tags:
+        - Playback
+
+      operationId: discoverPlaybackTargets
+
+      summary: Discover remote playback targets
+
+      description: |
+        Starts asynchronous renderer discovery.
+
+        For DLNA this performs SSDP discovery and processes UPnP device
+        descriptions.
+
+        The call returns immediately.
+
+        Discovery results become available through:
+
+        - `/api/playback/targets`
+        - `playback.target-added`
+        - `playback.target-updated`
+        - `playback.target-removed`
+
+      security:
+        - BearerJwt: []
+
+      responses:
+
+        "202":
+          description: Discovery started.
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/media:
+    put:
+      tags:
+        - Playback
+
+      operationId: loadPlaybackMedia
+
+      summary: Load media on a playback target
+
+      description: |
+        Loads a JSMusicDB library track on the selected remote playback
+        target.
+
+        node-mp3stream creates an opaque temporary media capability for the
+        renderer and supplies that URL to the renderer.
+
+        The client's JWT is never exposed to the renderer.
+
+        If `autoplay` is true, playback is started after the resource is
+        loaded.
+
+        If `positionMs` is supplied, node-mp3stream attempts to seek after
+        loading.
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoadMediaRequest"
+
+      responses:
+
+        "200":
+          description: Media accepted by the playback service.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoadMediaResponse"
+
+        "400":
+          $ref: "#/components/responses/ApiBadRequest"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "415":
+          $ref: "#/components/responses/PlaybackUnsupportedMedia"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/play:
+    post:
+      tags:
+        - Playback
+
+      operationId: playPlaybackTarget
+
+      summary: Start or resume playback
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      responses:
+
+        "204":
+          description: Play command accepted.
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/pause:
+    post:
+      tags:
+        - Playback
+
+      operationId: pausePlaybackTarget
+
+      summary: Pause playback
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      responses:
+
+        "204":
+          description: Pause command accepted.
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/stop:
+    post:
+      tags:
+        - Playback
+
+      operationId: stopPlaybackTarget
+
+      summary: Stop playback
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      responses:
+
+        "204":
+          description: Stop command accepted.
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/position:
+    put:
+      tags:
+        - Playback
+
+      operationId: seekPlaybackTarget
+
+      summary: Seek to an absolute playback position
+
+      description: |
+        Position is expressed in milliseconds.
+
+        DLNA implementations normally translate the position into
+        AVTransport.Seek using REL_TIME.
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackPositionRequest"
+
+      responses:
+
+        "204":
+          description: Seek command accepted.
+
+        "400":
+          $ref: "#/components/responses/ApiBadRequest"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/volume:
+    put:
+      tags:
+        - Playback
+
+      operationId: setPlaybackTargetVolume
+
+      summary: Set volume or mute state
+
+      description: |
+        Volume is normalized to 0.0 through 1.0.
+
+        The playback provider translates the normalized value to the
+        renderer's actual volume scale.
+
+        Renderer volume must not be used to implement ReplayGain.
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      requestBody:
+        required: true
+
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackVolumeRequest"
+
+      responses:
+
+        "204":
+          description: Volume or mute command accepted.
+
+        "400":
+          $ref: "#/components/responses/ApiBadRequest"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "409":
+          $ref: "#/components/responses/PlaybackConflict"
+
+        "422":
+          $ref: "#/components/responses/PlaybackUnsupportedOperation"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /api/playback/targets/{targetId}/state:
+    get:
+      tags:
+        - Playback
+
+      operationId: getPlaybackTargetState
+
+      summary: Get observed playback state
+
+      description: |
+        Returns the current observed state of the renderer.
+
+        The state reflects information reported or observed from the
+        renderer.
+
+        A successful `play`, `pause`, `stop` or `seek` HTTP response does
+        not itself imply that the renderer reached that state.
+
+      security:
+        - BearerJwt: []
+
+      parameters:
+        - $ref: "#/components/parameters/TargetId"
+
+      responses:
+
+        "200":
+          description: Observed playback state.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackState"
+
+        "401":
+          $ref: "#/components/responses/ApiUnauthorized"
+
+        "404":
+          $ref: "#/components/responses/PlaybackTargetNotFound"
+
+        "504":
+          $ref: "#/components/responses/PlaybackTimeout"
+
+        "500":
+          $ref: "#/components/responses/ApiInternalError"
+
+  /version:
+    get:
+      tags:
+        - System
+
+      operationId: getVersion
+
+      summary: Get node-mp3stream version
+
+      security: []
+
+      responses:
+
+        "200":
+          description: Application version.
+
+          content:
+            application/json:
+
+              schema:
+                type: object
+                additionalProperties: false
+
+                required:
+                  - version
+
+                properties:
+
+                  version:
+                    type: string
+                    example: 5.12.0
+
+components:
+
+  securitySchemes:
+
+    BearerJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+      description: |
+        JWT issued by `/authenticate`.
+
+        The token MUST be transmitted exclusively using:
+
+            Authorization: Bearer <jwt>
+
+        The token MUST NOT be included in a URL or query parameter.
+
+  parameters:
+
+    TargetId:
+      name: targetId
+      in: path
+      required: true
+
+      description: |
+        Stable remote playback target identifier.
+
+        DLNA target IDs are derived from the UPnP UDN/UUID rather than
+        an IP address.
+
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+
+      example: "dlna:uuid:abc123"
+
+  schemas:
+
+    RsaPublicKey:
+      type: object
+
+      required:
+        - kty
+        - n
+        - e
+
+      properties:
+
+        kty:
+          type: string
+          const: RSA
+
+        n:
+          type: string
+          description: Base64url encoded RSA modulus.
+
+        e:
+          type: string
+          description: Base64url encoded RSA public exponent.
+
+        alg:
+          type: string
+          example: RSA-OAEP-512
+
+        ext:
+          type: boolean
+
+        key_ops:
+          type: array
+          items:
+            type: string
+
+      additionalProperties: true
+
+    ScanProgress:
+      type: object
+
+      required:
+        - status
+
+      properties:
+
+        progress:
+          oneOf:
+            - type: string
+            - type: integer
+              minimum: 0
+              maximum: 100
+
+        status:
+          type: string
+          enum:
+            - ready
+            - scanning
+            - error
+
+      additionalProperties: false
+
+    MediaPurpose:
+      type: string
+      enum:
+        - browser
+        - renderer
+
+    CreateMediaRequest:
+      type: object
+      additionalProperties: false
+
+      required:
+        - path
+        - purpose
+
+      properties:
+
+        path:
+          type: string
+          minLength: 1
+          maxLength: 4096
+
+          description: |
+            Media path relative to MUSICPATH.
+
+          example: "/The Gathering/Souvenirs/06 - Heroes for Ghosts.flac"
+
+        purpose:
+          $ref: "#/components/schemas/MediaPurpose"
+
+        targetId:
+          type: string
+
+          description: |
+            Optional playback target that will consume the media resource.
+
+            Normally supplied when purpose is `renderer`.
+
+    CreateMediaResponse:
+      type: object
+      additionalProperties: false
+
+      required:
+        - mediaId
+        - url
+        - expiresAt
+
+      properties:
+
+        mediaId:
+          type: string
+          example: c69f5811
+
+        url:
+          type: string
+          format: uri
+
+          example: "http://192.168.1.10:16882/api/media/J7r2BFRveC5jJHbP8Q"
+
+        expiresAt:
+          type: string
+          format: date-time
+
+    PlaybackTargetType:
+      type: string
+      enum:
+        - dlna
+
+    PlaybackCapabilities:
+      type: object
+      additionalProperties: false
+
+      required:
+        - play
+        - pause
+        - stop
+        - seek
+        - volume
+        - mute
+
+      properties:
+
+        play:
+          type: boolean
+
+        pause:
+          type: boolean
+
+        stop:
+          type: boolean
+
+        seek:
+          type: boolean
+
+        volume:
+          type: boolean
+
+        mute:
+          type: boolean
+
+    PlaybackTarget:
+      type: object
+      additionalProperties: false
+
+      required:
+        - id
+        - type
+        - name
+        - available
+        - capabilities
+
+      properties:
+
+        id:
+          type: string
+          example: "dlna:uuid:abc123"
+
+        type:
+          $ref: "#/components/schemas/PlaybackTargetType"
+
+        name:
+          type: string
+          example: Living Room
+
+        manufacturer:
+          type: string
+          example: Denon
+
+        model:
+          type: string
+          example: AVR-X3800H
+
+        available:
+          type: boolean
+
+        capabilities:
+          $ref: "#/components/schemas/PlaybackCapabilities"
+
+    PlaybackTransportState:
+      type: string
+      enum:
+        - idle
+        - loading
+        - playing
+        - paused
+        - stopped
+        - transitioning
+        - error
+        - unknown
+
+    PlaybackState:
+      type: object
+      additionalProperties: false
+
+      required:
+        - targetId
+        - transport
+
+      properties:
+
+        targetId:
+          type: string
+          example: "dlna:uuid:abc123"
+
+        transport:
+          $ref: "#/components/schemas/PlaybackTransportState"
+
+        mediaId:
+          type: string
+          example: c69f5811
+
+        positionMs:
+          type: integer
+          minimum: 0
+          example: 127532
+
+        durationMs:
+          type: integer
+          minimum: 0
+          example: 256000
+
+        volume:
+          type: number
+          minimum: 0
+          maximum: 1
+          example: 0.72
+
+        muted:
+          type: boolean
+
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-11-23T09:55:43.381Z"
+
+    LibraryPlaybackSource:
+      type: object
+      additionalProperties: false
+
+      required:
+        - type
+        - path
+
+      properties:
+
+        type:
+          type: string
+          const: library
+
+        path:
+          type: string
+          minLength: 1
+          maxLength: 4096
+
+          description: |
+            Path to the media file relative to MUSICPATH.
+
+          example: "/The Gathering/Souvenirs/06 - Heroes for Ghosts.flac"
+
+    PlaybackMediaMetadata:
+      type: object
+      additionalProperties: false
+
+      required:
+        - id
+        - title
+
+      properties:
+
+        id:
+          type: string
+          minLength: 1
+
+        title:
+          type: string
+          minLength: 1
+
+        artist:
+          type: string
+
+        album:
+          type: string
+
+        durationMs:
+          type: integer
+          minimum: 0
+
+        mimeType:
+          type: string
+          example: audio/flac
+
+        sampleRate:
+          type: integer
+          minimum: 1
+          example: 96000
+
+        bitsPerSample:
+          type: integer
+          minimum: 1
+          example: 24
+
+        channels:
+          type: integer
+          minimum: 1
+          example: 2
+
+    LoadMediaRequest:
+      type: object
+      additionalProperties: false
+
+      required:
+        - source
+        - metadata
+
+      properties:
+
+        source:
+          $ref: "#/components/schemas/LibraryPlaybackSource"
+
+        metadata:
+          $ref: "#/components/schemas/PlaybackMediaMetadata"
+
+        autoplay:
+          type: boolean
+          default: true
+
+        positionMs:
+          type: integer
+          minimum: 0
+          default: 0
+
+      examples:
+        - source:
+            type: library
+            path: "/The Gathering/Souvenirs/06 - Heroes for Ghosts.flac"
+
+          metadata:
+            id: track-id
+            title: Heroes for Ghosts
+            artist: The Gathering
+            album: Souvenirs
+            durationMs: 256000
+            mimeType: audio/flac
+            sampleRate: 44100
+            bitsPerSample: 16
+            channels: 2
+
+          autoplay: true
+          positionMs: 0
+
+    LoadMediaResponse:
+      type: object
+      additionalProperties: false
+
+      required:
+        - targetId
+        - mediaId
+        - state
+
+      properties:
+
+        targetId:
+          type: string
+          example: "dlna:uuid:abc123"
+
+        mediaId:
+          type: string
+          example: c69f5811
+
+        state:
+          $ref: "#/components/schemas/PlaybackTransportState"
+
+    PlaybackPositionRequest:
+      type: object
+      additionalProperties: false
+
+      required:
+        - positionMs
+
+      properties:
+
+        positionMs:
+          type: integer
+          minimum: 0
+          example: 127500
+
+    PlaybackVolumeRequest:
+      type: object
+      additionalProperties: false
+
+      properties:
+
+        volume:
+          type: number
+          minimum: 0
+          maximum: 1
+          example: 0.72
+
+        muted:
+          type: boolean
+          example: false
+
+      anyOf:
+        - required:
+            - volume
+
+        - required:
+            - muted
+
+    PlaybackErrorCode:
+      type: string
+
+      enum:
+        - TARGET_NOT_FOUND
+        - TARGET_UNAVAILABLE
+        - UNSUPPORTED_OPERATION
+        - UNSUPPORTED_MEDIA
+        - MEDIA_NOT_FOUND
+        - MEDIA_NOT_REACHABLE
+        - INVALID_POSITION
+        - UPNP_ERROR
+        - COMMAND_TIMEOUT
+        - AUTHENTICATION_REQUIRED
+        - INTERNAL_ERROR
+
+    ApiError:
+      type: object
+      additionalProperties: false
+
+      required:
+        - code
+        - message
+
+      properties:
+
+        code:
+          type: string
+
+        message:
+          type: string
+
+        targetId:
+          type: string
+
+        details:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+
+      required:
+        - error
+
+      properties:
+
+        error:
+          $ref: "#/components/schemas/ApiError"
+
+    EventEnvelope:
+      type: object
+      additionalProperties: false
+
+      required:
+        - eventId
+        - timestamp
+        - data
+
+      properties:
+
+        eventId:
+          type: string
+
+          description: |
+            Process-local monotonically increasing SSE identifier.
+
+        timestamp:
+          type: string
+          format: date-time
+
+        targetId:
+          type: string
+
+        data:
+          type: object
+          additionalProperties: true
+
+    PlaybackStateEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - transport
+
+      properties:
+
+        transport:
+          $ref: "#/components/schemas/PlaybackTransportState"
+
+        mediaId:
+          type: string
+
+        positionMs:
+          type: integer
+          minimum: 0
+
+        durationMs:
+          type: integer
+          minimum: 0
+
+    PlaybackPositionEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - positionMs
+
+      properties:
+
+        mediaId:
+          type: string
+
+        positionMs:
+          type: integer
+          minimum: 0
+
+        durationMs:
+          type: integer
+          minimum: 0
+
+    PlaybackVolumeEventData:
+      type: object
+      additionalProperties: false
+
+      properties:
+
+        volume:
+          type: number
+          minimum: 0
+          maximum: 1
+
+        muted:
+          type: boolean
+
+      anyOf:
+        - required:
+            - volume
+
+        - required:
+            - muted
+
+    PlaybackEndedEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - mediaId
+
+      properties:
+
+        mediaId:
+          type: string
+
+    PlaybackTargetEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - target
+
+      properties:
+
+        target:
+          $ref: "#/components/schemas/PlaybackTarget"
+
+    PlaybackTargetRemovedEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - targetId
+
+      properties:
+
+        targetId:
+          type: string
+
+    PlaybackErrorEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - error
+
+      properties:
+
+        error:
+          $ref: "#/components/schemas/ApiError"
+
+    LibraryScanEventData:
+      type: object
+      additionalProperties: false
+
+      required:
+        - status
+
+      properties:
+
+        progress:
+          oneOf:
+            - type: integer
+              minimum: 0
+              maximum: 100
+
+            - type: string
+
+        status:
+          type: string
+          enum:
+            - ready
+            - scanning
+            - error
+
+  responses:
+
+    BadRequest:
+      description: Invalid request parameters or payload.
+
+    Unauthorized:
+      description: |
+        Authentication is required or the supplied Bearer token is invalid.
+
+    Forbidden:
+      description: Access to the requested resource is forbidden.
+
+    NotFound:
+      description: Requested resource was not found.
+
+    PayloadTooLarge:
+      description: Request payload exceeds the allowed size.
+
+    UnsupportedMediaType:
+      description: Unsupported media type.
+
+    BadGateway:
+      description: Remote server returned an invalid or unsuccessful response.
+
+    InternalServerError:
+      description: Internal server error.
+
+    ApiBadRequest:
+      description: Invalid API request.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: INVALID_POSITION
+              message: Playback position must be a non-negative integer.
+
+    ApiUnauthorized:
+      description: Missing or invalid Bearer token.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: AUTHENTICATION_REQUIRED
+              message: Authentication is required.
+
+    ApiForbidden:
+      description: Requested resource is not accessible.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: FORBIDDEN
+              message: Requested resource is not accessible.
+
+    MediaNotFound:
+      description: Music-library media resource was not found.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: MEDIA_NOT_FOUND
+              message: Media resource was not found.
+
+    PlaybackTargetNotFound:
+      description: Playback target was not found.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: TARGET_NOT_FOUND
+              message: Playback target was not found.
+              targetId: "dlna:uuid:abc123"
+
+    PlaybackConflict:
+      description: |
+        Requested operation conflicts with current renderer state or the
+        target is unavailable.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: TARGET_UNAVAILABLE
+              message: Playback target is currently unavailable.
+              targetId: "dlna:uuid:abc123"
+
+    PlaybackUnsupportedMedia:
+      description: Playback target does not support the media resource.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: UNSUPPORTED_MEDIA
+              message: The selected renderer does not support this media format.
+              targetId: "dlna:uuid:abc123"
+
+    PlaybackUnsupportedOperation:
+      description: Playback target does not support the requested operation.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: UNSUPPORTED_OPERATION
+              message: The selected renderer does not support seeking.
+              targetId: "dlna:uuid:abc123"
+
+    PlaybackTimeout:
+      description: Playback target did not respond in time.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: COMMAND_TIMEOUT
+              message: Playback target did not respond.
+              targetId: "dlna:uuid:abc123"
+
+    ApiInternalError:
+      description: Internal API error.
+
+      content:
+        application/json:
+
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: An internal server error occurred.
